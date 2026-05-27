@@ -1052,8 +1052,8 @@ class NCPClient {
   ) {
     const region = "kr";
     const host = bucket
-      ? `${bucket}.${region}.ncloudstorage.com`
-      : `${region}.ncloudstorage.com`;
+      ? `${bucket}.${region}.object.ncloudstorage.com`
+      : `${region}.object.ncloudstorage.com`;
     const path = objectKey.startsWith("/") ? objectKey : `/${objectKey}`;
     const now = new Date();
     const datetime = now.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
@@ -1219,6 +1219,191 @@ class NCPClient {
 
   async abortMultipartUpload(bucket: string, objectKey: string, uploadId: string) {
     return await this.storageRequest("DELETE", bucket, `/${objectKey}`, { uploadId });
+  }
+
+  // ===== Cloud Insight APIs =====
+  // Base URL: https://cw.apigw.ntruss.com
+  // Content-Type: application/json (POST 시)
+
+  private async cloudInsightRequest(method: string, path: string, body?: any, queryParams?: Record<string, string>) {
+    const cwBaseUrl = "https://cw.apigw.ntruss.com";
+    const timestamp = Date.now().toString();
+
+    let urlPath = path;
+    if (queryParams && Object.keys(queryParams).length > 0) {
+      const qs = new URLSearchParams(queryParams).toString();
+      urlPath = `${path}?${qs}`;
+    }
+
+    const signature = generateSignature(
+      method,
+      urlPath,
+      timestamp,
+      this.accessKey,
+      this.secretKey
+    );
+
+    const config: any = {
+      method,
+      url: `${cwBaseUrl}${urlPath}`,
+      headers: {
+        "x-ncp-apigw-timestamp": timestamp,
+        "x-ncp-iam-access-key": this.accessKey,
+        "x-ncp-apigw-signature-v2": signature,
+        "Content-Type": "application/json",
+      },
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    };
+
+    if (body !== undefined && method !== "GET") {
+      config.data = JSON.stringify(body);
+    }
+
+    try {
+      const response = await axios(config);
+      return response.data;
+    } catch (error: any) {
+      throw new Error(`Cloud Insight API Error: ${error.response?.data?.message || error.response?.data || error.message}`);
+    }
+  }
+
+  // ----- Data APIs -----
+
+  // 단일 메트릭 시계열 데이터 조회
+  // cw_key: 서비스별 product key (서버VPC: "460438474722512896")
+  // metric 예시: avg_cpu_used_rto, mem_usert, avg_fs_usert, avg_snd_bps, avg_rcv_bps
+  // interval: Min1 | Min5 | Min30 | Hour2 | Day1
+  // aggregation: AVG | SUM | MAX | MIN | COUNT
+  // dimensions 예시: { instanceNo: "서버인스턴스번호", type: "svr" }
+  async queryCloudInsightData(params: {
+    timeStart: number;   // Unix timestamp (ms)
+    timeEnd: number;
+    cw_key: string;
+    productName: string;
+    metric: string;
+    interval: string;
+    aggregation: string;
+    dimensions: Record<string, string>;
+  }) {
+    return await this.cloudInsightRequest("POST", "/cw_fea/real/cw/api/data/query", params);
+  }
+
+  // 복수 메트릭 시계열 데이터 한번에 조회 (최대 20개)
+  async queryCloudInsightDataMultiple(params: {
+    timeStart: number;
+    timeEnd: number;
+    metricInfoList: Array<{
+      prodKey: string;
+      metric: string;
+      interval: string;
+      aggregation: string;
+      dimensions: Record<string, string>;
+    }>;
+  }) {
+    return await this.cloudInsightRequest("POST", "/cw_fea/real/cw/api/data/query/multiple", params);
+  }
+
+  // ----- Server Top APIs -----
+
+  // CPU/메모리/파일시스템 사용률 상위 5대 서버 조회
+  // query: avg_cpu_used_rto | mem_usert | avg_fs_usert
+  // prod: VPC (default) | Classic
+  async getServersTop(query: string, prod: string = "VPC") {
+    return await this.cloudInsightRequest(
+      "POST",
+      "/cw_fea/real/cw/api/servers/top",
+      undefined,
+      { query, prod }
+    );
+  }
+
+  // ----- Event APIs -----
+
+  // 이벤트 검색
+  async searchCloudInsightEvent(params: {
+    startTime: string;   // Unix timestamp (초)
+    endTime: string;
+    prodKey?: string;
+    pageNum?: number;
+    pageSize?: number;
+  }) {
+    return await this.cloudInsightRequest("POST", "/cw_fea/real/cw/api/event/search", params);
+  }
+
+  // 이벤트 발생 건수 조회
+  async searchEventCountConsole(params: {
+    startTime: string;
+    endTime: string;
+    prodKey?: string;
+  }) {
+    return await this.cloudInsightRequest("POST", "/cw_fea/real/cw/api/event/search/count/console", params);
+  }
+
+  // ----- Event Rule APIs -----
+
+  // 이벤트 룰 목록 조회
+  async getRuleGroupList() {
+    return await this.cloudInsightRequest("GET", "/cw_fea/real/cw/api/rule/group/list");
+  }
+
+  // 이벤트 룰 상세 조회
+  async getRuleGroup(ruleGroupId: string) {
+    return await this.cloudInsightRequest("GET", `/cw_fea/real/cw/api/rule/group/${ruleGroupId}`);
+  }
+
+  // 이벤트 룰 삭제
+  async deleteRuleGroup(ruleGroupId: string) {
+    return await this.cloudInsightRequest("DELETE", `/cw_fea/real/cw/api/rule/group/${ruleGroupId}`);
+  }
+
+  // 모니터링 대상 그룹 목록 조회
+  async getAllMonitorGrp() {
+    return await this.cloudInsightRequest("GET", "/cw_fea/real/cw/api/monitor/group/list/all");
+  }
+
+  // 룰 템플릿(모니터링 항목 그룹) 목록 조회
+  async getMetricsGroupList() {
+    return await this.cloudInsightRequest("GET", "/cw_fea/real/cw/api/rule/group/metric/list");
+  }
+
+  // ----- Schema APIs -----
+
+  // 서비스별 product key(cw_key) 목록 조회
+  async getSystemSchemaKeyList() {
+    return await this.cloudInsightRequest("GET", "/cw_fea/real/cw/api/cw/key/list");
+  }
+
+  // 스키마 조회 (cw_key로 해당 서비스 메트릭 정보 확인)
+  async getProductSchema(cwKey: string) {
+    return await this.cloudInsightRequest("GET", `/cw_fea/real/cw/api/schema/${cwKey}`);
+  }
+
+  // ----- Dashboard APIs -----
+
+  // 대시보드 목록 조회
+  async getDashboardList() {
+    return await this.cloudInsightRequest("GET", "/cw_fea/real/cw/api/dashboard/list");
+  }
+
+  // 대시보드 위젯 목록 조회
+  async getDashboardWidgetList(dashboardId: string) {
+    return await this.cloudInsightRequest("GET", `/cw_fea/real/cw/api/dashboard/${dashboardId}/widget/list`);
+  }
+
+  // ----- Plugin APIs -----
+
+  // 모든 인스턴스의 포트 플러그인 목록 조회
+  async getAllPortPlugin() {
+    return await this.cloudInsightRequest("GET", "/cw_server/real/api/plugin/port", undefined, {
+      "x-ncp-dmn_cd": "PUB",
+    });
+  }
+
+  // 모든 인스턴스의 프로세스 플러그인 목록 조회
+  async getAllProcessPlugin() {
+    return await this.cloudInsightRequest("GET", "/cw_server/real/api/plugin/process", undefined, {
+      "x-ncp-dmn_cd": "PUB",
+    });
   }
 }
 
@@ -2949,6 +3134,171 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["bucket", "objectKey", "uploadId"],
         },
       },
+
+      // ===== Cloud Insight =====
+      {
+        name: "ci_query_data",
+        description: "Cloud Insight에서 단일 메트릭 시계열 데이터를 조회합니다. 서버 CPU/메모리/디스크/네트워크 사용량 확인에 활용합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            timeStart: { type: "number", description: "조회 시작 시각 (Unix timestamp, 밀리초)" },
+            timeEnd: { type: "number", description: "조회 종료 시각 (Unix timestamp, 밀리초)" },
+            cw_key: { type: "string", description: "서비스 product key. 서버(VPC): 460438474722512896" },
+            productName: { type: "string", description: "서비스명 (예: System/Server(VPC))" },
+            metric: { type: "string", description: "메트릭명 (예: avg_cpu_used_rto, mem_usert, avg_fs_usert, avg_snd_bps)" },
+            interval: { type: "string", description: "집계 주기 (Min1 | Min5 | Min30 | Hour2 | Day1)" },
+            aggregation: { type: "string", description: "집계 함수 (AVG | SUM | MAX | MIN | COUNT)" },
+            dimensions: { type: "object", description: "차원 정보 (예: {instanceNo: 서버번호, type: svr})" },
+          },
+          required: ["timeStart", "timeEnd", "cw_key", "productName", "metric", "interval", "aggregation", "dimensions"],
+        },
+      },
+      {
+        name: "ci_query_data_multiple",
+        description: "Cloud Insight에서 여러 메트릭 시계열 데이터를 한 번에 조회합니다 (최대 20개). 여러 서버 또는 여러 지표를 동시에 비교할 때 사용합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            timeStart: { type: "number", description: "조회 시작 시각 (Unix timestamp, 밀리초)" },
+            timeEnd: { type: "number", description: "조회 종료 시각 (Unix timestamp, 밀리초)" },
+            metricInfoList: {
+              type: "array",
+              description: "조회 조건 목록 (최대 20개)",
+              items: {
+                type: "object",
+                properties: {
+                  prodKey: { type: "string", description: "product key (cw_key)" },
+                  metric: { type: "string", description: "메트릭명" },
+                  interval: { type: "string", description: "집계 주기" },
+                  aggregation: { type: "string", description: "집계 함수" },
+                  dimensions: { type: "object", description: "차원 정보" },
+                },
+              },
+            },
+          },
+          required: ["timeStart", "timeEnd", "metricInfoList"],
+        },
+      },
+      {
+        name: "ci_get_servers_top",
+        description: "CPU/메모리/파일시스템 사용률 기준 상위 5대 서버를 조회합니다. 사용량이 높거나 낮은 서버를 빠르게 파악할 때 활용합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "메트릭명 (avg_cpu_used_rto | mem_usert | avg_fs_usert)" },
+            prod: { type: "string", description: "환경 (VPC | Classic, 기본값: VPC)" },
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "ci_search_event",
+        description: "Cloud Insight 이벤트(알람)를 조회합니다. 특정 기간 동안 발생한 임계치 초과 이벤트를 확인할 수 있습니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            startTime: { type: "string", description: "조회 시작 시각 (Unix timestamp, 초)" },
+            endTime: { type: "string", description: "조회 종료 시각 (Unix timestamp, 초)" },
+            prodKey: { type: "string", description: "product key로 필터링 (선택)" },
+            pageNum: { type: "number", description: "페이지 번호" },
+            pageSize: { type: "number", description: "페이지당 결과 수" },
+          },
+          required: ["startTime", "endTime"],
+        },
+      },
+      {
+        name: "ci_search_event_count",
+        description: "Cloud Insight 이벤트 발생 건수를 조회합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            startTime: { type: "string", description: "조회 시작 시각 (Unix timestamp, 초)" },
+            endTime: { type: "string", description: "조회 종료 시각 (Unix timestamp, 초)" },
+            prodKey: { type: "string", description: "product key로 필터링 (선택)" },
+          },
+          required: ["startTime", "endTime"],
+        },
+      },
+      {
+        name: "ci_get_rule_group_list",
+        description: "Cloud Insight 이벤트 룰(알람 규칙) 목록을 조회합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "ci_get_rule_group",
+        description: "Cloud Insight 특정 이벤트 룰의 상세 정보를 조회합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ruleGroupId: { type: "string", description: "이벤트 룰 ID" },
+          },
+          required: ["ruleGroupId"],
+        },
+      },
+      {
+        name: "ci_delete_rule_group",
+        description: "Cloud Insight 이벤트 룰을 삭제합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ruleGroupId: { type: "string", description: "삭제할 이벤트 룰 ID" },
+          },
+          required: ["ruleGroupId"],
+        },
+      },
+      {
+        name: "ci_get_all_monitor_grp",
+        description: "Cloud Insight 모니터링 대상 그룹 목록을 조회합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "ci_get_metrics_group_list",
+        description: "Cloud Insight 룰 템플릿(모니터링 항목 그룹) 목록을 조회합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "ci_get_system_schema_key_list",
+        description: "Cloud Insight 서비스별 product key(cw_key) 목록을 조회합니다. ci_query_data 호출 시 cw_key 값을 확인할 때 사용합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "ci_get_product_schema",
+        description: "Cloud Insight에서 특정 cw_key에 해당하는 서비스의 스키마(메트릭 목록, 차원 정보 등)를 조회합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            cwKey: { type: "string", description: "product key (cw_key). ci_get_system_schema_key_list로 확인 가능" },
+          },
+          required: ["cwKey"],
+        },
+      },
+      {
+        name: "ci_get_dashboard_list",
+        description: "Cloud Insight 대시보드 목록을 조회합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "ci_get_dashboard_widget_list",
+        description: "Cloud Insight 특정 대시보드의 위젯 목록을 조회합니다.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            dashboardId: { type: "string", description: "대시보드 ID" },
+          },
+          required: ["dashboardId"],
+        },
+      },
+      {
+        name: "ci_get_all_port_plugin",
+        description: "Cloud Insight에 등록된 모든 인스턴스의 포트 플러그인 목록을 조회합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "ci_get_all_process_plugin",
+        description: "Cloud Insight에 등록된 모든 인스턴스의 프로세스 플러그인 목록을 조회합니다.",
+        inputSchema: { type: "object", properties: {} },
+      },
     ],
   };
 });
@@ -3668,6 +4018,93 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "abort_multipart_upload": {
         const typedArgs = args as { bucket: string; objectKey: string; uploadId: string };
         result = await ncpClient.abortMultipartUpload(typedArgs.bucket, typedArgs.objectKey, typedArgs.uploadId);
+        break;
+      }
+
+      // ===== Cloud Insight =====
+      case "ci_query_data": {
+        const typedArgs = args as {
+          timeStart: number; timeEnd: number; cw_key: string; productName: string;
+          metric: string; interval: string; aggregation: string; dimensions: Record<string, string>;
+        };
+        result = await ncpClient.queryCloudInsightData(typedArgs);
+        break;
+      }
+      case "ci_query_data_multiple": {
+        const typedArgs = args as {
+          timeStart: number; timeEnd: number;
+          metricInfoList: Array<{
+            prodKey: string; metric: string; interval: string;
+            aggregation: string; dimensions: Record<string, string>;
+          }>;
+        };
+        result = await ncpClient.queryCloudInsightDataMultiple(typedArgs);
+        break;
+      }
+      case "ci_get_servers_top": {
+        const typedArgs = args as { query: string; prod?: string };
+        result = await ncpClient.getServersTop(typedArgs.query, typedArgs.prod);
+        break;
+      }
+      case "ci_search_event": {
+        const typedArgs = args as {
+          startTime: string; endTime: string; prodKey?: string;
+          pageNum?: number; pageSize?: number;
+        };
+        result = await ncpClient.searchCloudInsightEvent(typedArgs);
+        break;
+      }
+      case "ci_search_event_count": {
+        const typedArgs = args as { startTime: string; endTime: string; prodKey?: string };
+        result = await ncpClient.searchEventCountConsole(typedArgs);
+        break;
+      }
+      case "ci_get_rule_group_list": {
+        result = await ncpClient.getRuleGroupList();
+        break;
+      }
+      case "ci_get_rule_group": {
+        const typedArgs = args as { ruleGroupId: string };
+        result = await ncpClient.getRuleGroup(typedArgs.ruleGroupId);
+        break;
+      }
+      case "ci_delete_rule_group": {
+        const typedArgs = args as { ruleGroupId: string };
+        result = await ncpClient.deleteRuleGroup(typedArgs.ruleGroupId);
+        break;
+      }
+      case "ci_get_all_monitor_grp": {
+        result = await ncpClient.getAllMonitorGrp();
+        break;
+      }
+      case "ci_get_metrics_group_list": {
+        result = await ncpClient.getMetricsGroupList();
+        break;
+      }
+      case "ci_get_system_schema_key_list": {
+        result = await ncpClient.getSystemSchemaKeyList();
+        break;
+      }
+      case "ci_get_product_schema": {
+        const typedArgs = args as { cwKey: string };
+        result = await ncpClient.getProductSchema(typedArgs.cwKey);
+        break;
+      }
+      case "ci_get_dashboard_list": {
+        result = await ncpClient.getDashboardList();
+        break;
+      }
+      case "ci_get_dashboard_widget_list": {
+        const typedArgs = args as { dashboardId: string };
+        result = await ncpClient.getDashboardWidgetList(typedArgs.dashboardId);
+        break;
+      }
+      case "ci_get_all_port_plugin": {
+        result = await ncpClient.getAllPortPlugin();
+        break;
+      }
+      case "ci_get_all_process_plugin": {
+        result = await ncpClient.getAllProcessPlugin();
         break;
       }
 
